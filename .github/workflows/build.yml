@@ -1,0 +1,594 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/example/guardian app/src/main/res/xml app/src/main/res/values app/src/main/assets
+          cat > settings.gradle.kts <<'GUARDIAN_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Guardian"
+          include(":app")
+          GUARDIAN_EOF
+          cat > build.gradle.kts <<'GUARDIAN_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          GUARDIAN_EOF
+          cat > gradle.properties <<'GUARDIAN_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          kotlin.code.style=official
+          GUARDIAN_EOF
+          cat > app/build.gradle.kts <<'GUARDIAN_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.guardian"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.guardian"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/AndroidManifest.xml <<'GUARDIAN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+              <application android:label="Guardian" android:icon="@android:drawable/ic_lock_lock">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity android:name=".UnlockActivity" android:exported="false"
+                      android:excludeFromRecents="true" android:launchMode="singleTask" />
+
+                  <service
+                      android:name=".DnsVpnService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse"
+                      android:permission="android.permission.BIND_VPN_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="dns_filtering" />
+                  </service>
+
+                  <service
+                      android:name=".GuardService"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+
+                  <receiver
+                      android:name=".AdminReceiver"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_DEVICE_ADMIN">
+                      <meta-data
+                          android:name="android.app.device_admin"
+                          android:resource="@xml/device_admin" />
+                      <intent-filter>
+                          <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                      </intent-filter>
+                  </receiver>
+
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          GUARDIAN_EOF
+          cat > app/src/main/res/xml/device_admin.xml <<'GUARDIAN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-policies />
+          </device-admin>
+          GUARDIAN_EOF
+          cat > app/src/main/res/xml/accessibility_config.xml <<'GUARDIAN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="100"
+              android:description="@string/guard_desc" />
+          GUARDIAN_EOF
+          cat > app/src/main/res/values/guardian_strings.xml <<'GUARDIAN_EOF'
+          <resources>
+              <string name="guard_desc">Prevents protection from being switched off or removed without the guardian password.</string>
+          </resources>
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/AdminReceiver.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.app.admin.DeviceAdminReceiver
+          import android.content.Context
+          import android.content.Intent
+
+          /** While this is an active device admin, Android refuses to uninstall the app. */
+          class AdminReceiver : DeviceAdminReceiver() {
+              override fun onDisableRequested(context: Context, intent: Intent): CharSequence =
+                  "Disabling protection requires the guardian password."
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/BlockList.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.content.Context
+
+          /** Loads a hosts-format or plain domain list from assets/blocklist.txt. */
+          class BlockList(context: Context) {
+              private val domains = HashSet<String>(200_000)
+
+              init {
+                  context.assets.open("blocklist.txt").bufferedReader().useLines { lines ->
+                      lines.forEach { raw ->
+                          val line = raw.substringBefore('#').trim()
+                          if (line.isEmpty()) return@forEach
+                          val parts = line.split(Regex("\\s+"))
+                          val d = (if (parts.size >= 2) parts[1] else parts[0]).lowercase()
+                          if (d != "localhost" && d.contains('.')) domains.add(d)
+                      }
+                  }
+              }
+
+              /** Blocks the domain itself and any subdomain of a listed domain. */
+              fun isBlocked(name: String): Boolean {
+                  var d = name.lowercase().trimEnd('.')
+                  while (true) {
+                      if (d in domains) return true
+                      val i = d.indexOf('.')
+                      if (i < 0) return false
+                      d = d.substring(i + 1)
+                  }
+              }
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/BootReceiver.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.net.VpnService
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(ctx: Context, intent: Intent) {
+                  // Only works after the user has granted VPN permission once.
+                  if (VpnService.prepare(ctx) == null) {
+                      ctx.startForegroundService(Intent(ctx, DnsVpnService::class.java))
+                  }
+              }
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/DnsParser.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          object DnsParser {
+              /** Returns (queried domain, offset where the question section ends), or null if malformed. */
+              fun readQuestion(d: ByteArray): Pair<String, Int>? {
+                  if (d.size < 17) return null
+                  var i = 12
+                  val sb = StringBuilder()
+                  while (i < d.size) {
+                      val len = d[i].toInt() and 0xFF
+                      if (len == 0) { i++; break }
+                      if (len >= 0xC0 || i + len >= d.size) return null
+                      if (sb.isNotEmpty()) sb.append('.')
+                      sb.append(String(d, i + 1, len, Charsets.US_ASCII))
+                      i += len + 1
+                  }
+                  val end = i + 4                          // QTYPE + QCLASS
+                  return if (end <= d.size) Pair(sb.toString(), end) else null
+              }
+
+              /** Builds an NXDOMAIN response that echoes the original question. */
+              fun nxdomain(query: ByteArray, qEnd: Int): ByteArray {
+                  val r = query.copyOf(qEnd)
+                  r[2] = 0x81.toByte(); r[3] = 0x83.toByte()   // QR=1, RD=1, RA=1, RCODE=3
+                  r[6] = 0; r[7] = 0; r[8] = 0; r[9] = 0; r[10] = 0; r[11] = 0
+                  return r
+              }
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/DnsVpnService.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.content.Intent
+          import android.net.VpnService
+          import android.os.ParcelFileDescriptor
+          import java.io.FileInputStream
+          import java.io.FileOutputStream
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
+          import java.util.concurrent.Executors
+
+          /**
+           * Local VPN that only captures DNS (traffic to 10.0.0.1:53).
+           * Blocked domains get NXDOMAIN; everything else is forwarded upstream.
+           */
+          class DnsVpnService : VpnService() {
+
+              companion object {
+                  const val VPN_DNS = "10.0.0.1"
+                  // CleanBrowsing Adult Filter (second layer: blocks adult content + forces SafeSearch)
+                  const val UPSTREAM_DNS = "185.228.168.10"
+              }
+
+              private var tun: ParcelFileDescriptor? = null
+              @Volatile private var running = false
+              private var worker: Thread? = null
+              private val pool = Executors.newFixedThreadPool(8)
+              private lateinit var blockList: BlockList
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startForeground(1, buildNotification())
+                  if (!running) start()
+                  return START_STICKY
+              }
+
+              private fun start() {
+                  blockList = BlockList(this)
+                  tun = Builder()
+                      .setSession("Guardian")
+                      .addAddress("10.0.0.2", 32)
+                      .addDnsServer(VPN_DNS)
+                      .addRoute(VPN_DNS, 32)          // only DNS goes through us
+                      .setBlocking(true)
+                      .establish() ?: return
+                  running = true
+                  worker = Thread { loop() }.also { it.start() }
+              }
+
+              private fun loop() {
+                  val fd = tun ?: return
+                  val input = FileInputStream(fd.fileDescriptor)
+                  val output = FileOutputStream(fd.fileDescriptor)
+                  val buf = ByteArray(32767)
+                  while (running) {
+                      val n = try { input.read(buf) } catch (e: Exception) { break }
+                      if (n <= 0) continue
+                      handlePacket(buf.copyOf(n), output)
+                  }
+              }
+
+              private fun handlePacket(pkt: ByteArray, out: FileOutputStream) {
+                  if (pkt.size < 28 || (pkt[0].toInt() shr 4) != 4) return        // IPv4 only
+                  if (pkt[9].toInt() != 17) return                                 // UDP only
+                  val ihl = (pkt[0].toInt() and 0x0F) * 4
+                  val dstPort = u16(pkt, ihl + 2)
+                  if (dstPort != 53) return
+
+                  val dnsOff = ihl + 8
+                  val dns = pkt.copyOfRange(dnsOff, pkt.size)
+                  val (name, qEnd) = DnsParser.readQuestion(dns) ?: return
+
+                  if (blockList.isBlocked(name)) {
+                      writeReply(pkt, ihl, DnsParser.nxdomain(dns, qEnd), out)
+                  } else {
+                      pool.execute {
+                          try {
+                              DatagramSocket().use { s ->
+                                  protect(s)                                       // bypass our own VPN
+                                  s.soTimeout = 4000
+                                  val up = InetAddress.getByName(UPSTREAM_DNS)
+                                  s.send(DatagramPacket(dns, dns.size, up, 53))
+                                  val r = ByteArray(4096)
+                                  val resp = DatagramPacket(r, r.size)
+                                  s.receive(resp)
+                                  writeReply(pkt, ihl, r.copyOf(resp.length), out)
+                              }
+                          } catch (_: Exception) { /* timeout: client will retry */ }
+                      }
+                  }
+              }
+
+              /** Wraps a DNS payload in IPv4+UDP, swapping addresses/ports of the original query. */
+              private fun writeReply(query: ByteArray, ihl: Int, payload: ByteArray, out: FileOutputStream) {
+                  val total = 20 + 8 + payload.size
+                  val p = ByteArray(total)
+                  p[0] = 0x45; p[8] = 64; p[9] = 17
+                  p[2] = (total shr 8).toByte(); p[3] = total.toByte()
+                  System.arraycopy(query, 16, p, 12, 4)       // src = original dst
+                  System.arraycopy(query, 12, p, 16, 4)       // dst = original src
+                  val c = checksum(p, 0, 20)
+                  p[10] = (c shr 8).toByte(); p[11] = c.toByte()
+                  p[20] = 0; p[21] = 53                        // src port 53
+                  p[22] = query[ihl]; p[23] = query[ihl + 1]   // dst port = original src port
+                  val ul = 8 + payload.size
+                  p[24] = (ul shr 8).toByte(); p[25] = ul.toByte()  // UDP checksum 0 = valid for IPv4
+                  System.arraycopy(payload, 0, p, 28, payload.size)
+                  synchronized(out) { out.write(p) }
+              }
+
+              private fun u16(b: ByteArray, i: Int) = ((b[i].toInt() and 0xFF) shl 8) or (b[i + 1].toInt() and 0xFF)
+
+              private fun checksum(b: ByteArray, off: Int, len: Int): Int {
+                  var sum = 0
+                  var i = off
+                  while (i < off + len) { sum += u16(b, i); i += 2 }
+                  while (sum shr 16 != 0) sum = (sum and 0xFFFF) + (sum shr 16)
+                  return sum.inv() and 0xFFFF
+              }
+
+              private fun buildNotification(): Notification {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("guardian", "Protection", NotificationManager.IMPORTANCE_MIN))
+                  return Notification.Builder(this, "guardian")
+                      .setContentTitle("Protection is active")
+                      .setSmallIcon(android.R.drawable.ic_lock_lock)
+                      .build()
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  tun?.close()
+                  pool.shutdownNow()
+                  super.onDestroy()
+              }
+
+              override fun onRevoke() {           // user turned VPN off in system settings: bring it back
+                  running = false
+                  tun?.close()
+                  startForegroundService(Intent(this, DnsVpnService::class.java))
+              }
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/GuardService.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+
+          /**
+           * Watches Settings / package installer screens. If a screen mentions this app
+           * (app info, uninstall dialog, device admin, accessibility, VPN lists) or Private DNS,
+           * it sends the user Home and asks for the password.
+           */
+          class GuardService : AccessibilityService() {
+
+              private val restricted = listOf("Guardian", "Private DNS")
+              private var lastLock = 0L
+
+              override fun onAccessibilityEvent(e: AccessibilityEvent) {
+                  val pkg = e.packageName?.toString() ?: return
+                  if (!pkg.contains("settings") && !pkg.contains("packageinstaller")) return
+                  if (PasswordStore.isUnlocked(this)) return
+                  val root = rootInActiveWindow ?: return
+                  if (containsRestricted(root, 0)) lock()
+              }
+
+              private fun containsRestricted(n: AccessibilityNodeInfo?, depth: Int): Boolean {
+                  if (n == null || depth > 30) return false
+                  val text = "${n.text ?: ""} ${n.contentDescription ?: ""}"
+                  if (restricted.any { text.contains(it, ignoreCase = true) }) return true
+                  for (i in 0 until n.childCount) {
+                      val child = n.getChild(i)
+                      val hit = containsRestricted(child, depth + 1)
+                      if (hit) return true
+                  }
+                  return false
+              }
+
+              private fun lock() {
+                  val now = System.currentTimeMillis()
+                  performGlobalAction(GLOBAL_ACTION_HOME)
+                  if (now - lastLock > 2000) {            // avoid launching the prompt repeatedly
+                      lastLock = now
+                      startActivity(Intent(this, UnlockActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                  }
+              }
+
+              override fun onInterrupt() {}
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/MainActivity.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.app.Activity
+          import android.app.admin.DevicePolicyManager
+          import android.content.ComponentName
+          import android.content.Intent
+          import android.net.VpnService
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.widget.*
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  // Once a password exists, the setup screen itself needs it.
+                  if (PasswordStore.isSet(this) && !PasswordStore.isUnlocked(this)) {
+                      startActivity(Intent(this, UnlockActivity::class.java)); finish(); return
+                  }
+                  val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 48, 48, 48) }
+
+                  if (!PasswordStore.isSet(this)) {
+                      val pw = EditText(this).apply {
+                          hint = "Guardian password (set by your accountability partner)"
+                          inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                      }
+                      box.addView(pw)
+                      box.addView(Button(this).apply {
+                          text = "1. Save password"
+                          setOnClickListener {
+                              if (pw.text.length >= 6) { PasswordStore.set(this@MainActivity, pw.text.toString()); recreate() }
+                              else Toast.makeText(this@MainActivity, "Use at least 6 characters", Toast.LENGTH_SHORT).show()
+                          }
+                      })
+                  }
+                  box.addView(Button(this).apply { text = "2. Start DNS filter"; setOnClickListener { startVpn() } })
+                  box.addView(Button(this).apply { text = "3. Enable device admin (blocks uninstall)"; setOnClickListener { requestAdmin() } })
+                  box.addView(Button(this).apply {
+                      text = "4. Enable accessibility guard"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  })
+                  box.addView(Button(this).apply {
+                      text = "Lock now"
+                      setOnClickListener { PasswordStore.lockNow(this@MainActivity); finish() }
+                  })
+                  setContentView(ScrollView(this).apply { addView(box) })
+              }
+
+              private fun startVpn() {
+                  val i = VpnService.prepare(this)
+                  if (i != null) startActivityForResult(i, 1) else startService()
+              }
+
+              private fun startService() = startForegroundService(Intent(this, DnsVpnService::class.java))
+
+              private fun requestAdmin() {
+                  val admin = ComponentName(this, AdminReceiver::class.java)
+                  startActivity(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                      .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin)
+                      .putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Prevents the app from being uninstalled."))
+              }
+
+              override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+                  if (req == 1 && res == RESULT_OK) startService()
+              }
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/PasswordStore.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.content.Context
+          import java.security.SecureRandom
+          import javax.crypto.SecretKeyFactory
+          import javax.crypto.spec.PBEKeySpec
+
+          /** Stores a salted PBKDF2 hash of the guardian password and a temporary unlock window. */
+          object PasswordStore {
+              private fun prefs(c: Context) = c.getSharedPreferences("guardian", Context.MODE_PRIVATE)
+
+              fun isSet(c: Context) = prefs(c).contains("hash")
+
+              fun set(c: Context, password: String) {
+                  val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+                  prefs(c).edit()
+                      .putString("salt", salt.toHex())
+                      .putString("hash", hash(password, salt).toHex())
+                      .apply()
+              }
+
+              fun verify(c: Context, password: String): Boolean {
+                  val p = prefs(c)
+                  val salt = p.getString("salt", null)?.fromHex() ?: return false
+                  return hash(password, salt).toHex() == p.getString("hash", null)
+              }
+
+              fun unlock(c: Context, minutes: Int) =
+                  prefs(c).edit().putLong("until", System.currentTimeMillis() + minutes * 60_000L).apply()
+
+              fun lockNow(c: Context) = prefs(c).edit().putLong("until", 0).apply()
+
+              fun isUnlocked(c: Context) = System.currentTimeMillis() < prefs(c).getLong("until", 0)
+
+              private fun hash(pw: String, salt: ByteArray): ByteArray =
+                  SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                      .generateSecret(PBEKeySpec(pw.toCharArray(), salt, 100_000, 256)).encoded
+
+              private fun ByteArray.toHex() = joinToString("") { "%02x".format(it) }
+              private fun String.fromHex() = chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+          }
+          GUARDIAN_EOF
+          cat > app/src/main/java/com/example/guardian/UnlockActivity.kt <<'GUARDIAN_EOF'
+          package com.example.guardian
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.text.InputType
+          import android.view.Gravity
+          import android.widget.*
+
+          class UnlockActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(64, 64, 64, 64)
+                  }
+                  val info = TextView(this).apply { text = "Guardian password required to change protection settings."; textSize = 18f }
+                  val input = EditText(this).apply {
+                      hint = "Password"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                  }
+                  val ok = Button(this).apply {
+                      text = "Unlock for 5 minutes"
+                      setOnClickListener {
+                          if (PasswordStore.verify(this@UnlockActivity, input.text.toString())) {
+                              PasswordStore.unlock(this@UnlockActivity, 5); finish()
+                          } else Toast.makeText(this@UnlockActivity, "Wrong password", Toast.LENGTH_SHORT).show()
+                      }
+                  }
+                  val cancel = Button(this).apply { text = "Cancel"; setOnClickListener { finish() } }
+                  listOf(info, input, ok, cancel).forEach { box.addView(it) }
+                  setContentView(box)
+              }
+          }
+          GUARDIAN_EOF
+          curl -sSL -o app/src/main/assets/blocklist.txt https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-only/hosts
+          wc -l app/src/main/assets/blocklist.txt
+      - name: Build
+        run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Guardian-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
